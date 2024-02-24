@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import scipy.optimize as sco
 from scipy.stats import norm
+from scipy.cluster.hierarchy import linkage, leaves_list
+from scipy.spatial.distance import pdist, squareform
 
 class DataDownloader:
     
@@ -484,10 +486,82 @@ class AssetAllocation:
         semivariance = np.dot(weights, np.dot(self.asset_cov_matrix, weights))
 
         return semivariance
+    
+    def neg_sortino_ratio(self, weights):
+        """
+        Calcula el ratio de Sortino negativo de un portafolio. 
+        El ratio de Sortino es una variante del ratio de Sharpe que diferencia la volatilidad dañina de la volatilidad total, 
+        utilizando la desviación a la baja del portafolio en lugar de la desviación estándar total de los retornos del portafolio.
+
+        Parámetros:
+        - weights: array-like, los pesos de los activos en el portafolio.
+        Devoluciones:
+        - float, el ratio de Sortino negativo del portafolio para su minimización en rutinas de optimización.
+        
+        1. Calcula el rendimiento del portafolio: Usa el producto punto entre los pesos de los activos del portafolio y los retornos
+        promedio  e dichos activos para obtener el rendimiento del portafolio.
+        2. Filtra los rendimientos negativos: Selecciona solo los rendimientos negativos de los activos del portafolio, lo que es necesario
+        para calcular la semivarianza que se enfoca en la volatilidad a la baja.
+        3. Calcula los retornos negativos ponderados: Aplica los pesos del portafolio a los rendimientos negativos filtrados para obtener
+        una representación ponderada de los mismos.
+        4. Calcula la semivarianza: Eleva al cuadrado los retornos negativos ponderados y luego toma el promedio para obtener la
+        semivarianza, que mide la variabilidad de las pérdidas.
+        5. Calcula el ratio de Sortino: Resta la tasa libre de riesgo diaria del rendimiento del portafolio y divide el resultado por la 
+        raíz cuadrada de la semivarianza. Esto da el ratio de Sortino, que es una medida de rendimiento ajustado al riesgo que considera 
+        solo la volatilidad negativa.
+
+        """ 
+        # Calcula el rendimiento del portafolio
+        portfolio_return = np.dot(weights, self.average_asset_returns)
+        # Calcula la semivarianza de los rendimientos negativos
+        negative_returns = self.asset_returns[self.asset_returns < 0]
+        weighted_negative_returns = negative_returns.dot(weights)
+        semivariance = np.mean(weighted_negative_returns**2)
+        # Calcula el ratio de Sortino
+        sortino_ratio = (portfolio_return - self.rf_daily) / np.sqrt(semivariance)
+        # Retorna el negativo del ratio de Sortino para la minimización
+        return -sortino_ratio
+    
+    
+    def neg_risk_parity_ratio(self, weights):
+        """
+        
+        Calcula el ratio de Risk Parity negativo para un conjunto dado de pesos de activos, 
+        optimizando hacia una distribución equitativa del riesgo entre los activos del portafolio.
+        Risk Parity es una estrategia de inversión que busca distribuir equitativamente el riesgo entre los componentes de un portafolio.
+        
+        Parámetros:
+        - weights: array-like, los pesos de los activos en el portafolio.
+    
+        Devoluciones:
+        - float, el ratio de Risk Parity negativo del portafolio para su minimización en rutinas de optimización.
+    
+        Detalles del proceso:
+        1. Determina la volatilidad total del portafolio usando los pesos actuales y la matriz de covarianza de los retornos de los activos.
+        2. Evalúa cómo cada peso adicional en un activo contribuye al riesgo total del portafolio, 
+        utilizando la matriz de covarianza y los pesos actuales.
+        3. Multiplica la contribución marginal al riesgo de cada activo por sus respectivos pesos para obtener su contribución total 
+        al riesgo del portafolio.
+        4. Suma las diferencias cuadradas entre la contribución al riesgo de cada activo y el promedio de estas contribuciones, 
+        buscando una distribución equitativa del riesgo.
+        5. Devuelve el valor negativo de esta suma: Al minimizar este valor negativo, 
+        la optimización se enfoca en igualar la contribución al riesgo de cada activo, alineándose con el principio de Risk Parity.
+
+    
+            Este enfoque busca lograr un equilibrio en la contribución al riesgo de cada activo, en lugar de enfocarse solo en los 
+            rendimientos esperados, promoviendo así una diversificación más robusta en términos de riesgo.
+        """
+        
+        portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(self.asset_cov_matrix, weights)))
+        marginal_risk_contribution = self.asset_cov_matrix.dot(weights) / portfolio_volatility
+        total_risk_contribution = weights * marginal_risk_contribution
+        risk_parity_ratio = np.sum((total_risk_contribution - total_risk_contribution.mean())**2)
+
+        return -risk_parity_ratio
 
     
     def Optimize_Portfolio(asset_allocation_instance, method = "Montecarlo", **kwargs):
-        optimization_names = ["Max Sharpe", "Max Omega", "Min VaR (Empirical)", "Min VaR (Parametric)", "Semivariance"]
+        optimization_names = ["Max Sharpe", "Max Omega", "Min VaR (Empirical)", "Min VaR (Parametric)", "Semivariance","Max Sortino","Risk Parity" ]
         optimized_weights = []
         optimized_values = []  
         
@@ -543,6 +617,26 @@ class AssetAllocation:
             )
             optimized_weights.append(weights_semivariance)
             optimized_values.append(value_semivariance) 
+            
+            # Optimize for Sortino Ratio
+            weights_sortino, value_sortino = AssetAllocation.optimize_SLSQP(
+                asset_allocation_instance.neg_sortino_ratio,
+                asset_allocation_instance.start_weights,
+                asset_allocation_instance.bounds,
+                asset_allocation_instance.constraints
+            )
+            optimized_weights.append(weights_sortino)
+            optimized_values.append(value_sortino*-1) 
+        
+            # Optimize for Risk Parity
+            weights_risk_parity, value_risk_parity = AssetAllocation.optimize_SLSQP(
+                asset_allocation_instance.neg_risk_parity_ratio,
+                asset_allocation_instance.start_weights,
+                asset_allocation_instance.bounds,
+                asset_allocation_instance.constraints
+            )
+            optimized_weights.append(weights_risk_parity)
+            optimized_values.append(value_risk_parity*-1)
         
         
             # Store the results in a DataFrame 
@@ -607,6 +701,26 @@ class AssetAllocation:
             )
             optimized_weights.append(weights_semivariance)
             optimized_values.append(value_semivariance) 
+            
+            # Optimize for Sortino Ratio
+            weights_sortino, value_sortino = AssetAllocation.optimize_MonteCarlo(
+                asset_allocation_instance.neg_sortino_ratio,
+                asset_allocation_instance.start_weights,
+                asset_allocation_instance.bounds,
+                **kwargs
+            )
+            optimized_weights.append(weights_sortino)
+            optimized_values.append(value_sortino*-1) 
+        
+            # Optimize for Risk Parity con Monte Carlo
+            weights_risk_parity, value_risk_parity = AssetAllocation.optimize_MonteCarlo(
+                asset_allocation_instance.neg_risk_parity_ratio,
+                asset_allocation_instance.start_weights,
+                asset_allocation_instance.bounds,
+                **kwargs
+            )
+            optimized_weights.append(weights_risk_parity)
+            optimized_values.append(value_risk_parity*-1)
         
         
             # Store the results in a DataFrame 
@@ -674,6 +788,28 @@ class AssetAllocation:
             )
             optimized_weights.append(weights_semivariance)
             optimized_values.append(value_semivariance) 
+            
+             # Optimize for Sortino Ratio
+            weights_sortino, value_sortino = AssetAllocation.optimize_genetic(
+                asset_allocation_instance.neg_sortino_ratio,
+                asset_allocation_instance.start_weights,
+                asset_allocation_instance.bounds,
+                asset_allocation_instance.constraints,
+                **kwargs
+            )
+            optimized_weights.append(weights_sortino)
+            optimized_values.append(value_sortino*-1)  
+
+            # Optimize for Risk Parity with genetic algorithm
+            weights_risk_parity, value_risk_parity = AssetAllocation.optimize_genetic(
+                asset_allocation_instance.neg_risk_parity_ratio,
+                asset_allocation_instance.start_weights,
+                asset_allocation_instance.bounds,
+                asset_allocation_instance.constraints,
+                **kwargs
+            )
+            optimized_weights.append(weights_risk_parity)
+            optimized_values.append(value_risk_parity*-1) 
         
             # Store the results in a DataFrame 
             results_df = pd.DataFrame(optimized_weights, index=optimization_names, columns=asset_allocation_instance.asset_prices.columns)
@@ -735,6 +871,28 @@ class AssetAllocation:
             )
             optimized_weights.append(weights_semivariance)
             optimized_values.append(value_semivariance) 
+            
+             # Optimize for Sortino Ratio
+            weights_sortino, value_sortino = AssetAllocation.optimize_gradient(
+            asset_allocation_instance.neg_sortino_ratio,
+            asset_allocation_instance.start_weights,
+            asset_allocation_instance.bounds,
+       
+            **kwargs
+            )
+            optimized_weights.append(weights_sortino)
+            optimized_values.append(value_sortino*-1)  # Convertir
+            
+            # Optimize for Risk Parity with genetic algorithm
+            weights_risk_parity, value_risk_parity = AssetAllocation.optimize_gradient(
+                asset_allocation_instance.neg_risk_parity_ratio,
+                asset_allocation_instance.start_weights,
+                asset_allocation_instance.bounds,
+               
+                **kwargs
+            )
+            optimized_weights.append(weights_risk_parity)
+            optimized_values.append(value_risk_parity*-1)
         
         
             # Store the results in a DataFrame 
